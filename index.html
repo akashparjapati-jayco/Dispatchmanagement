@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>JAYCO Dispatch Board</title>
+
+<!--
+  ============================================================
+  FIRESTORE SECURITY RULE (paste into Firebase Console > Firestore > Rules)
+  ------------------------------------------------------------
+  rules_version = '2';
+  service cloud.firestore {
+    match /databases/{database}/documents {
+      match /dispatch/{doc} {
+        allow read, write: if true;
+      }
+    }
+  }
+  ------------------------------------------------------------
+  This is OPEN access (no login) scoped only to the /dispatch
+  collection, matching the single shared board this file uses.
+  Tighten later if you add authentication.
+  ============================================================
+-->
+
+<script>
+  window.addEventListener('error', function (e) {
+    var root = document.getElementById('root');
+    if (root && !root.hasChildNodes()) {
+      root.innerHTML = '<div style="padding:24px;color:#eae6dd;background:#161513;font-family:monospace;white-space:pre-wrap;min-height:100vh;">Dashboard failed to load.\n\nError: ' +
+        (e && e.message ? e.message : 'Unknown error') +
+        '\nFile: ' + (e && e.filename ? e.filename : 'unknown') + (e && e.lineno ? (':' + e.lineno) : '') +
+        '\n\nThis usually means a script did not load (check your internet connection) or one of the CDN links is blocked.\nOpen DevTools (F12) > Console tab for full details.</div>';
+    }
+  });
+</script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+<style>
+  :root {
+    --bg:#161513; --panel:#211f1c; --panel2:#2a2825; --line:#38352f;
+    --red:#c41e2a; --red-dim:#8a1620; --yellow:#f0a500; --green:#5fae6c;
+    --text:#eae6dd; --text-dim:#9c968a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; background:var(--bg); color:var(--text); font-family:'Oswald','Arial Narrow',sans-serif; }
+  .mono { font-family:'JetBrains Mono',monospace; }
+  button { cursor:pointer; font-family:inherit; }
+  input, select { font-family:inherit; }
+  ::-webkit-scrollbar { height:8px; width:8px; }
+  ::-webkit-scrollbar-thumb { background:var(--line); border-radius:4px; }
+  .tab-btn:hover { background:var(--panel2) !important; }
+  .row-btn:hover { filter:brightness(1.2); }
+  .stat-card:hover { transform:translateY(-2px); }
+  input:focus, select:focus { outline:2px solid var(--red); outline-offset:1px; }
+  .spin { animation:spin 0.8s linear infinite; display:inline-block; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+// ============================================================
+// FIREBASE CONFIG — paste your project's config object here.
+// Get it from: Firebase Console > Project settings > General
+// > Your apps > SDK setup and configuration
+// ============================================================
+const firebaseConfig = {
+  apiKey: "PASTE_YOUR_API_KEY",
+  authDomain: "PASTE_YOUR_PROJECT.firebaseapp.com",
+  projectId: "PASTE_YOUR_PROJECT_ID",
+  storageBucket: "PASTE_YOUR_PROJECT.appspot.com",
+  messagingSenderId: "PASTE_YOUR_SENDER_ID",
+  appId: "PASTE_YOUR_APP_ID",
+};
+
+let db = null;
+let firebaseReady = false;
+const isConfigured = firebaseConfig.apiKey && firebaseConfig.apiKey.indexOf("PASTE_YOUR") !== 0;
+if (isConfigured && typeof firebase !== "undefined") {
+  try {
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.firestore();
+    firebaseReady = true;
+  } catch (e) {
+    console.warn("Firebase init failed, running in local-only mode:", e);
+    db = null;
+    firebaseReady = false;
+  }
+}
+
+const DOC_REF = () => db.collection("dispatch").doc("board");
+
+// ---------- Reference data (JAYCO product world) ----------
+const PLUMMER_SERIES = ["SN 205","SN 505","SN 605","SNA 505","SNH 605","SAF 22515","SD 3130","SDAF 22528","SNLN 505","SOFN 522","SONL 522"];
+const ADAPTER_SLEEVES = ["H 205","H 305","H 2305","HE 2305","H 3122"];
+const LOCATING_RINGS = ["FRB 22.5/52","FRA 25/58","FRB 30/62"];
+const BEARINGS = ["22205","22305","22315 CC/W33","1205","2305","23122 CC/W33"];
+const SEAL_TYPES = ["Taconite Seal","Labyrinth Seal","Felt Seal","V-Ring Seal","Nitrile Lip Seal","Double Lip Seal","End Cover (Open)","End Cover (Closed)"];
+const BOX_TYPES = [
+  { type:"Wooden Box", sizes:["Small (9x9x9\")","Medium (15x15x12\")","Large (24x18x18\")","Custom Crate"] },
+  { type:"Corrugated Box", sizes:["Small (8x8x6\")","Medium (12x12x10\")","Large (18x18x14\")","Extra Large (24x20x18\")"] },
+];
+const TABS = [
+  { id:"overview", label:"Overview" },
+  { id:"paintrepair", label:"Paint & Repair" },
+  { id:"stock", label:"Finish Stock" },
+  { id:"packing", label:"Ready to Pack" },
+  { id:"boxes", label:"Box In/Out" },
+];
+
+const uid = () => Math.random().toString(36).slice(2,9);
+const today = () => new Date().toISOString().slice(0,10);
+const fmtDate = (d) => new Date(d).toLocaleDateString("en-IN",{ day:"2-digit", month:"short" });
+
+const SEED = {
+  paintLog: [
+    { id:uid(), date:today(), item:"SN 605", qty:24, stage:"Painting Done", worker:"Ramesh", notes:"Ready for stock in" },
+    { id:uid(), date:today(), item:"SAF 22515", qty:8, stage:"Repair - Bore Rework", worker:"Suresh", notes:"Bore oversize, re-machining" },
+  ],
+  stock: [
+    { id:uid(), category:"Plummer Block", item:"SN 205", qty:145, unit:"Nos", location:"Rack A-1", reorder:50 },
+    { id:uid(), category:"Plummer Block", item:"SNA 505", qty:22, unit:"Nos", location:"Rack A-3", reorder:30 },
+    { id:uid(), category:"Adapter Sleeve", item:"H 2305", qty:60, unit:"Nos", location:"Rack B-2", reorder:25 },
+    { id:uid(), category:"Bearing", item:"22315 CC/W33", qty:12, unit:"Nos", location:"Rack C-1", reorder:20 },
+    { id:uid(), category:"Seal", item:"Taconite Seal", qty:300, unit:"Sets", location:"Bin S-1", reorder:100 },
+    { id:uid(), category:"Locating Ring", item:"FRB 22.5/52", qty:40, unit:"Nos", location:"Bin R-1", reorder:15 },
+  ],
+  tickets: [],
+  boxLog: [
+    { id:uid(), date:today(), direction:"in", type:"Wooden Box", size:"Medium (15x15x12\")", qty:50, party:"Kheda Packaging Co." },
+    { id:uid(), date:today(), direction:"out", type:"Corrugated Box", size:"Large (18x18x14\")", qty:12, party:"Dispatch - Nagpur order" },
+  ],
+};
+
+function App() {
+  const [tab, setTab] = useState("overview");
+  const [data, setData] = useState(null);
+  const [saveState, setSaveState] = useState("idle");
+  const [connMode, setConnMode] = useState(firebaseReady ? "connecting" : "unconfigured");
+
+  const [pForm, setPForm] = useState({ item:"", qty:"", stage:"Painting Done", worker:"", notes:"" });
+  const [sForm, setSForm] = useState({ category:"Plummer Block", item:"", qty:"", unit:"Nos", location:"", reorder:"" });
+  const [tForm, setTForm] = useState({ housing:"", sleeve:"", ring:"", bearing:"", seal1:"", seal2:"", boxType:BOX_TYPES[0].type, boxSize:BOX_TYPES[0].sizes[0], qty:1, dest:"" });
+  const [bForm, setBForm] = useState({ direction:"in", type:"Wooden Box", size:BOX_TYPES[0].sizes[0], qty:"", party:"" });
+  const [copiedId, setCopiedId] = useState(null);
+
+  // ---------- live sync from Firestore, or local fallback ----------
+  useEffect(() => {
+    if (!firebaseReady) {
+      setData(SEED);
+      setConnMode("unconfigured");
+      return;
+    }
+    const unsub = DOC_REF().onSnapshot(
+      (snap) => {
+        if (snap.exists) {
+          setData(snap.data());
+        } else {
+          DOC_REF().set(SEED).catch(() => {});
+          setData(SEED);
+        }
+        setConnMode("live");
+      },
+      (err) => {
+        console.error(err);
+        setConnMode("error");
+        setData((prev) => prev || SEED);
+      }
+    );
+    return () => unsub();
+  }, []);
+
+  const persist = useCallback((next) => {
+    setData(next);
+    if (!firebaseReady) return;
+    setSaveState("saving");
+    DOC_REF().set(next)
+      .then(() => setSaveState("idle"))
+      .catch(() => setSaveState("error"));
+  }, []);
+
+  if (!data) {
+    return <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",color:"var(--text-dim)",fontSize:"13px",gap:"8px"}}>
+      <span className="spin">⟳</span> Loading dispatch board…
+    </div>;
+  }
+
+  const { paintLog, stock, tickets, boxLog } = data;
+
+  const lowStock = useMemo(() => stock.filter(s => s.qty <= s.reorder), [stock]);
+  const boxBalance = useMemo(() => {
+    const bal = {};
+    boxLog.forEach(b => {
+      const key = `${b.type} — ${b.size}`;
+      bal[key] = (bal[key] || 0) + (b.direction === "in" ? Number(b.qty) : -Number(b.qty));
+    });
+    return bal;
+  }, [boxLog]);
+  const todaysPaint = useMemo(() => paintLog.filter(p => p.date === today()), [paintLog]);
+  const readyTickets = tickets.filter(t => t.status === "ready").length;
+
+  const addPaint = () => {
+    if (!pForm.item || !pForm.qty) return;
+    persist({ ...data, paintLog: [{ id:uid(), date:today(), ...pForm, qty:Number(pForm.qty) }, ...paintLog] });
+    setPForm({ item:"", qty:"", stage:"Painting Done", worker:"", notes:"" });
+  };
+  const delPaint = (id) => persist({ ...data, paintLog: paintLog.filter(p => p.id !== id) });
+
+  const addStock = () => {
+    if (!sForm.item || sForm.qty === "") return;
+    persist({ ...data, stock: [{ id:uid(), ...sForm, qty:Number(sForm.qty), reorder:Number(sForm.reorder || 0) }, ...stock] });
+    setSForm({ category:"Plummer Block", item:"", qty:"", unit:"Nos", location:"", reorder:"" });
+  };
+  const delStock = (id) => persist({ ...data, stock: stock.filter(s => s.id !== id) });
+  const adjustStock = (id, delta) => persist({ ...data, stock: stock.map(s => s.id === id ? { ...s, qty: Math.max(0, s.qty + delta) } : s) });
+
+  const addTicket = () => {
+    if (!tForm.housing) return;
+    persist({ ...data, tickets: [{ id:uid(), ...tForm, status:"packing", date:today() }, ...tickets] });
+    setTForm({ housing:"", sleeve:"", ring:"", bearing:"", seal1:"", seal2:"", boxType:BOX_TYPES[0].type, boxSize:BOX_TYPES[0].sizes[0], qty:1, dest:"" });
+  };
+  const cycleStatus = (id) => {
+    const order = ["packing","ready","dispatched"];
+    persist({ ...data, tickets: tickets.map(t => t.id === id ? { ...t, status: order[(order.indexOf(t.status)+1) % order.length] } : t) });
+  };
+  const delTicket = (id) => persist({ ...data, tickets: tickets.filter(t => t.id !== id) });
+
+  const ticketText = (t) => {
+    const seals = [t.seal1, t.seal2].filter(Boolean).join(" + ") || "—";
+    return `JAYCO ENGINEERING INDIA — PACKING SLIP
+------------------------------------
+Housing/Assembly : ${t.housing}
+Adapter Sleeve   : ${t.sleeve || "—"}
+Locating Ring    : ${t.ring || "—"}
+Bearing          : ${t.bearing || "—"}
+Seal / End Cover : ${seals}
+Qty              : ${t.qty}
+Box              : ${t.boxType} — ${t.boxSize}
+Destination      : ${t.dest || "—"}
+Date             : ${fmtDate(t.date)}
+Status           : ${t.status.toUpperCase()}`;
+  };
+  const copyTicket = (t) => {
+    navigator.clipboard.writeText(ticketText(t));
+    setCopiedId(t.id);
+    setTimeout(() => setCopiedId(null), 1500);
+  };
+
+  const addBox = () => {
+    if (bForm.qty === "" || !bForm.party) return;
+    persist({ ...data, boxLog: [{ id:uid(), date:today(), ...bForm, qty:Number(bForm.qty) }, ...boxLog] });
+    setBForm({ direction:"in", type:"Wooden Box", size:BOX_TYPES[0].sizes[0], qty:"", party:"" });
+  };
+  const delBox = (id) => persist({ ...data, boxLog: boxLog.filter(b => b.id !== id) });
+
+  const statusStyle = {
+    packing: { bg:"#3a3530", text:"#f0a500", label:"Packing" },
+    ready: { bg:"#2a3d2e", text:"#6fbf7a", label:"Ready to Send" },
+    dispatched: { bg:"#2a2a2a", text:"#8a8a85", label:"Dispatched" },
+  };
+
+  const inputStyle = { background:"var(--bg)", border:"1px solid var(--line)", color:"var(--text)", padding:"9px 10px", fontSize:"13px", width:"100%" };
+  const btnPrimary = { background:"var(--red)", color:"#fff", border:"none", padding:"9px 14px", fontWeight:700, fontSize:"13px", display:"flex", alignItems:"center", justifyContent:"center", gap:"6px", textTransform:"uppercase", letterSpacing:"0.5px" };
+  const iconBtn = { background:"var(--panel2)", border:"1px solid var(--line)", color:"var(--text-dim)", padding:"6px 10px" };
+  const iconBtnSmall = { ...iconBtn, padding:"3px 9px", fontWeight:700 };
+
+  function SelectWithLabel({ label, value, onChange, options, allowNone }) {
+    return <div>
+      <div className="mono" style={{fontSize:"10px",color:"var(--text-dim)",textTransform:"uppercase",marginBottom:"4px",letterSpacing:"0.5px"}}>{label}</div>
+      <select value={value} onChange={e => onChange(e.target.value)} style={inputStyle}>
+        {allowNone && <option value="">— None —</option>}
+        {!allowNone && <option value="">Select…</option>}
+        {options.map(o => <option key={o}>{o}</option>)}
+      </select>
+    </div>;
+  }
+
+  function TableBlock({ headers, rows, emptyText }) {
+    return <div style={{background:"var(--panel)",border:"1px solid var(--line)",overflowX:"auto"}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:"13px"}}>
+        <thead><tr style={{borderBottom:"1px solid var(--line)"}}>
+          {headers.map((h,i) => <th key={i} className="mono" style={{textAlign:"left",padding:"10px 12px",color:"var(--text-dim)",fontSize:"11px",textTransform:"uppercase",letterSpacing:"0.5px"}}>{h}</th>)}
+        </tr></thead>
+        <tbody>
+          {rows.length === 0 && <tr><td colSpan={headers.length} style={{padding:"20px",textAlign:"center",color:"var(--text-dim)"}}>{emptyText}</td></tr>}
+          {rows.map((r,i) => <tr key={i} style={{borderBottom:"1px solid var(--line)"}}>{r.map((c,j) => <td key={j} style={{padding:"10px 12px"}}>{c}</td>)}</tr>)}
+        </tbody>
+      </table>
+    </div>;
+  }
+
+  const connLabel = {
+    live: { text: "Synced — live across your team", color: "var(--text-dim)" },
+    connecting: { text: "Connecting…", color: "var(--text-dim)" },
+    error: { text: "Sync error — check Firestore rules / config", color: "var(--red)" },
+    unconfigured: { text: "Not connected — paste Firebase config in the file to sync", color: "var(--yellow)" },
+  }[connMode];
+
+  return <div style={{minHeight:"100vh"}}>
+    <div style={{background:"repeating-linear-gradient(135deg, var(--red) 0px, var(--red) 18px, #8a1620 18px, #8a1620 36px)",height:"6px",width:"100%"}} />
+    <div style={{padding:"20px 24px 0",borderBottom:"1px solid var(--line)"}}>
+      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",flexWrap:"wrap",gap:"8px"}}>
+        <div>
+          <h1 style={{margin:0,fontSize:"28px",fontWeight:700,letterSpacing:"0.5px",textTransform:"uppercase"}}>
+            JAYCO <span style={{color:"var(--red)"}}>Dispatch Board</span>
+          </h1>
+          <p className="mono" style={{margin:"4px 0 16px",fontSize:"12px",color:"var(--text-dim)",letterSpacing:"0.5px"}}>
+            PLUMMER BLOCK &amp; BEARING HOUSING DIVISION · DHARTI INDL. PARK, KHEDA · {new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}
+          </p>
+        </div>
+        <div className="mono" style={{fontSize:"11px",color: saveState==="error" ? "var(--red)" : connLabel.color, display:"flex",alignItems:"center",gap:"6px",paddingTop:"2px"}}>
+          {saveState === "saving" ? <><span className="spin">⟳</span> Saving…</> : connLabel.text}
+        </div>
+      </div>
+      <div style={{display:"flex",gap:"4px",overflowX:"auto"}}>
+        {TABS.map(t => {
+          const active = tab === t.id;
+          return <button key={t.id} className="tab-btn" onClick={() => setTab(t.id)}
+            style={{padding:"10px 16px",background: active?"var(--panel)":"transparent",border:"none",borderBottom: active?"3px solid var(--red)":"3px solid transparent",color: active?"var(--text)":"var(--text-dim)",fontSize:"13px",fontWeight:600,textTransform:"uppercase",letterSpacing:"0.5px",whiteSpace:"nowrap"}}>
+            {t.label}
+          </button>;
+        })}
+      </div>
+    </div>
+
+    <div style={{padding:"24px"}}>
+      {tab === "overview" && <div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(180px, 1fr))",gap:"14px",marginBottom:"24px"}}>
+          {[
+            { label:"Paint/Repair Today", value:todaysPaint.length, sub:"entries logged", color:"var(--yellow)" },
+            { label:"SKUs Below Reorder", value:lowStock.length, sub:"need attention", color: lowStock.length?"var(--red)":"var(--green)" },
+            { label:"Tickets Ready to Send", value:readyTickets, sub:`of ${tickets.length} total`, color:"var(--green)" },
+            { label:"Box Types Tracked", value:Object.keys(boxBalance).length, sub:"in / out", color:"var(--text)" },
+          ].map((s,i) => <div key={i} className="stat-card" style={{background:"var(--panel)",border:"1px solid var(--line)",borderLeft:`4px solid ${s.color}`,padding:"16px",transition:"transform 0.12s"}}>
+            <div className="mono" style={{fontSize:"11px",color:"var(--text-dim)",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:"6px"}}>{s.label}</div>
+            <div style={{fontSize:"32px",fontWeight:700,color:s.color}}>{s.value}</div>
+            <div className="mono" style={{fontSize:"11px",color:"var(--text-dim)"}}>{s.sub}</div>
+          </div>)}
+        </div>
+
+        {lowStock.length > 0 && <div style={{background:"var(--panel)",border:"1px solid var(--red-dim)",padding:"16px",marginBottom:"20px"}}>
+          <div style={{fontWeight:600,textTransform:"uppercase",fontSize:"13px",letterSpacing:"0.5px",marginBottom:"10px"}}>⚠ Reorder Alert</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(200px, 1fr))",gap:"8px"}}>
+            {lowStock.map(s => <div key={s.id} className="mono" style={{fontSize:"12px",background:"var(--bg)",padding:"8px 10px",border:"1px solid var(--line)"}}>
+              <span style={{color:"var(--yellow)"}}>{s.item}</span> — {s.qty} {s.unit} <span style={{color:"var(--text-dim)"}}>(reorder @ {s.reorder})</span>
+            </div>)}
+          </div>
+        </div>}
+
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"16px"}}>
+          <div style={{background:"var(--panel)",border:"1px solid var(--line)",padding:"16px"}}>
+            <div style={{fontWeight:600,textTransform:"uppercase",fontSize:"13px",marginBottom:"10px",letterSpacing:"0.5px"}}>Recent Paint / Repair</div>
+            {paintLog.slice(0,4).map(p => <div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid var(--line)",fontSize:"13px"}}>
+              <span>{p.item} <span className="mono" style={{color:"var(--text-dim)"}}>×{p.qty}</span></span>
+              <span style={{color:"var(--yellow)",fontSize:"12px"}}>{p.stage}</span>
+            </div>)}
+          </div>
+          <div style={{background:"var(--panel)",border:"1px solid var(--line)",padding:"16px"}}>
+            <div style={{fontWeight:600,textTransform:"uppercase",fontSize:"13px",marginBottom:"10px",letterSpacing:"0.5px"}}>Box Stock Balance</div>
+            {Object.entries(boxBalance).map(([k,v]) => <div key={k} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid var(--line)",fontSize:"13px"}}>
+              <span>{k}</span><span className="mono" style={{color: v<=5?"var(--red)":"var(--text)"}}>{v} pcs</span>
+            </div>)}
+          </div>
+        </div>
+      </div>}
+
+      {tab === "paintrepair" && <div>
+        <div style={{background:"var(--panel)",border:"1px solid var(--line)",padding:"16px",marginBottom:"20px"}}>
+          <div style={{fontWeight:600,textTransform:"uppercase",fontSize:"13px",marginBottom:"12px",letterSpacing:"0.5px"}}>Log Daily Entry</div>
+          <div style={{display:"grid",gridTemplateColumns:"1.2fr 0.7fr 1.2fr 1fr 1.5fr auto",gap:"8px"}}>
+            <input placeholder="Item / SKU (e.g. SN 605)" value={pForm.item} onChange={e => setPForm({...pForm, item:e.target.value})} style={inputStyle} />
+            <input placeholder="Qty" type="number" value={pForm.qty} onChange={e => setPForm({...pForm, qty:e.target.value})} style={inputStyle} />
+            <select value={pForm.stage} onChange={e => setPForm({...pForm, stage:e.target.value})} style={inputStyle}>
+              {["Painting - In Progress","Painting Done","Repair - Bore Rework","Repair - Crack Weld","Repair - Re-machining","Rejected"].map(s => <option key={s}>{s}</option>)}
+            </select>
+            <input placeholder="Worker" value={pForm.worker} onChange={e => setPForm({...pForm, worker:e.target.value})} style={inputStyle} />
+            <input placeholder="Notes" value={pForm.notes} onChange={e => setPForm({...pForm, notes:e.target.value})} style={inputStyle} />
+            <button onClick={addPaint} style={btnPrimary}>+</button>
+          </div>
+        </div>
+        <TableBlock headers={["Date","Item","Qty","Stage","Worker","Notes",""]} emptyText="No paint or repair entries yet."
+          rows={paintLog.map(p => [
+            fmtDate(p.date), p.item, p.qty,
+            <span style={{color: p.stage.includes("Repair")?"var(--yellow)": p.stage==="Rejected"?"var(--red)":"var(--green)"}}>{p.stage}</span>,
+            p.worker || "—", p.notes || "—",
+            <button className="row-btn" onClick={() => delPaint(p.id)} style={iconBtn}>✕</button>,
+          ])} />
+      </div>}
+
+      {tab === "stock" && <div>
+        <div style={{background:"var(--panel)",border:"1px solid var(--line)",padding:"16px",marginBottom:"20px"}}>
+          <div style={{fontWeight:600,textTransform:"uppercase",fontSize:"13px",marginBottom:"12px",letterSpacing:"0.5px"}}>Add Stock Line</div>
+          <div style={{display:"grid",gridTemplateColumns:"1.2fr 1.2fr 0.7fr 0.7fr 1fr 0.7fr auto",gap:"8px"}}>
+            <select value={sForm.category} onChange={e => setSForm({...sForm, category:e.target.value})} style={inputStyle}>
+              {["Plummer Block","Adapter Sleeve","Locating Ring","Bearing","Seal","End Cover","Lock Nut","Lock Washer"].map(c => <option key={c}>{c}</option>)}
+            </select>
+            <input placeholder="Item / SKU" value={sForm.item} onChange={e => setSForm({...sForm, item:e.target.value})} style={inputStyle} />
+            <input placeholder="Qty" type="number" value={sForm.qty} onChange={e => setSForm({...sForm, qty:e.target.value})} style={inputStyle} />
+            <select value={sForm.unit} onChange={e => setSForm({...sForm, unit:e.target.value})} style={inputStyle}>
+              {["Nos","Sets","Pairs","Kg"].map(u => <option key={u}>{u}</option>)}
+            </select>
+            <input placeholder="Rack / Bin" value={sForm.location} onChange={e => setSForm({...sForm, location:e.target.value})} style={inputStyle} />
+            <input placeholder="Reorder @" type="number" value={sForm.reorder} onChange={e => setSForm({...sForm, reorder:e.target.value})} style={inputStyle} />
+            <button onClick={addStock} style={btnPrimary}>+</button>
+          </div>
+        </div>
+        <TableBlock headers={["Category","Item","Qty","Unit","Location","Reorder @","Adjust",""]} emptyText="No stock recorded."
+          rows={stock.map(s => [
+            s.category, s.item,
+            <span className="mono" style={{color: s.qty<=s.reorder?"var(--red)":"var(--text)",fontWeight:600}}>{s.qty}</span>,
+            s.unit, s.location || "—", s.reorder,
+            <div style={{display:"flex",gap:"4px"}}>
+              <button className="row-btn" onClick={() => adjustStock(s.id,-1)} style={iconBtnSmall}>−</button>
+              <button className="row-btn" onClick={() => adjustStock(s.id,1)} style={iconBtnSmall}>+</button>
+            </div>,
+            <button className="row-btn" onClick={() => delStock(s.id)} style={iconBtn}>✕</button>,
+          ])} />
+      </div>}
+
+      {tab === "packing" && <div>
+        <div style={{background:"var(--panel)",border:"1px solid var(--line)",padding:"16px",marginBottom:"20px"}}>
+          <div style={{fontWeight:600,textTransform:"uppercase",fontSize:"13px",marginBottom:"12px",letterSpacing:"0.5px"}}>Build Packing Slip — Multiple Seal Combination</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4, 1fr)",gap:"8px",marginBottom:"8px"}}>
+            <SelectWithLabel label="Plummer Block" value={tForm.housing} onChange={v => setTForm({...tForm, housing:v})} options={PLUMMER_SERIES} />
+            <SelectWithLabel label="Adapter Sleeve" value={tForm.sleeve} onChange={v => setTForm({...tForm, sleeve:v})} options={ADAPTER_SLEEVES} allowNone />
+            <SelectWithLabel label="Locating Ring" value={tForm.ring} onChange={v => setTForm({...tForm, ring:v})} options={LOCATING_RINGS} allowNone />
+            <SelectWithLabel label="Bearing" value={tForm.bearing} onChange={v => setTForm({...tForm, bearing:v})} options={BEARINGS} allowNone />
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(2, 1fr)",gap:"8px",marginBottom:"8px"}}>
+            <SelectWithLabel label="Seal / End Cover — Side 1" value={tForm.seal1} onChange={v => setTForm({...tForm, seal1:v})} options={SEAL_TYPES} allowNone />
+            <SelectWithLabel label="Seal / End Cover — Side 2" value={tForm.seal2} onChange={v => setTForm({...tForm, seal2:v})} options={SEAL_TYPES} allowNone />
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1.3fr 1.3fr 0.6fr 1.5fr auto",gap:"8px"}}>
+            <select value={tForm.boxType} onChange={e => setTForm({...tForm, boxType:e.target.value, boxSize:BOX_TYPES.find(b=>b.type===e.target.value).sizes[0]})} style={inputStyle}>
+              {BOX_TYPES.map(b => <option key={b.type}>{b.type}</option>)}
+            </select>
+            <select value={tForm.boxSize} onChange={e => setTForm({...tForm, boxSize:e.target.value})} style={inputStyle}>
+              {BOX_TYPES.find(b=>b.type===tForm.boxType).sizes.map(s => <option key={s}>{s}</option>)}
+            </select>
+            <input placeholder="Qty" type="number" value={tForm.qty} onChange={e => setTForm({...tForm, qty:e.target.value})} style={inputStyle} />
+            <input placeholder="Destination / Customer" value={tForm.dest} onChange={e => setTForm({...tForm, dest:e.target.value})} style={inputStyle} />
+            <button onClick={addTicket} style={btnPrimary}>+ Slip</button>
+          </div>
+        </div>
+
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(300px, 1fr))",gap:"14px"}}>
+          {tickets.length === 0 && <div style={{color:"var(--text-dim)",fontSize:"13px"}}>No packing slips yet — build one above.</div>}
+          {tickets.map(t => {
+            const st = statusStyle[t.status];
+            return <div key={t.id} style={{background:"var(--panel)",border:"1px solid var(--line)",borderTop:`4px solid ${st.text}`,padding:"14px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"8px"}}>
+                <span className="mono" style={{fontSize:"11px",color:"var(--text-dim)"}}>{fmtDate(t.date)}</span>
+                <button className="row-btn" onClick={() => cycleStatus(t.id)} style={{background:st.bg,color:st.text,border:"none",padding:"3px 10px",fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>{st.label}</button>
+              </div>
+              <div style={{fontSize:"16px",fontWeight:700,marginBottom:"6px"}}>{t.housing}</div>
+              <div className="mono" style={{fontSize:"12px",color:"var(--text-dim)",lineHeight:1.7}}>
+                {t.sleeve && <div>Sleeve: <span style={{color:"var(--text)"}}>{t.sleeve}</span></div>}
+                {t.ring && <div>Ring: <span style={{color:"var(--text)"}}>{t.ring}</span></div>}
+                {t.bearing && <div>Bearing: <span style={{color:"var(--text)"}}>{t.bearing}</span></div>}
+                {(t.seal1 || t.seal2) && <div>Seal: <span style={{color:"var(--text)"}}>{[t.seal1,t.seal2].filter(Boolean).join(" + ")}</span></div>}
+                <div>Box: <span style={{color:"var(--text)"}}>{t.boxType}, {t.boxSize}</span></div>
+                <div>Qty: <span style={{color:"var(--text)"}}>{t.qty}</span> {t.dest && <>→ <span style={{color:"var(--text)"}}>{t.dest}</span></>}</div>
+              </div>
+              <div style={{display:"flex",gap:"8px",marginTop:"10px"}}>
+                <button className="row-btn" onClick={() => copyTicket(t)} style={{...iconBtn,flex:1}}>
+                  {copiedId === t.id ? "✓ Copied" : "⧉ Copy Slip"}
+                </button>
+                <button className="row-btn" onClick={() => delTicket(t.id)} style={iconBtn}>✕</button>
+              </div>
+            </div>;
+          })}
+        </div>
+      </div>}
+
+      {tab === "boxes" && <div>
+        <div style={{background:"var(--panel)",border:"1px solid var(--line)",padding:"16px",marginBottom:"20px"}}>
+          <div style={{fontWeight:600,textTransform:"uppercase",fontSize:"13px",marginBottom:"12px",letterSpacing:"0.5px"}}>Log Box Movement</div>
+          <div style={{display:"grid",gridTemplateColumns:"0.9fr 1.2fr 1.3fr 0.7fr 1.5fr auto",gap:"8px"}}>
+            <select value={bForm.direction} onChange={e => setBForm({...bForm, direction:e.target.value})} style={inputStyle}>
+              <option value="in">Inward</option><option value="out">Outward</option>
+            </select>
+            <select value={bForm.type} onChange={e => setBForm({...bForm, type:e.target.value, size:BOX_TYPES.find(b=>b.type===e.target.value).sizes[0]})} style={inputStyle}>
+              {BOX_TYPES.map(b => <option key={b.type}>{b.type}</option>)}
+            </select>
+            <select value={bForm.size} onChange={e => setBForm({...bForm, size:e.target.value})} style={inputStyle}>
+              {BOX_TYPES.find(b=>b.type===bForm.type).sizes.map(s => <option key={s}>{s}</option>)}
+            </select>
+            <input placeholder="Qty" type="number" value={bForm.qty} onChange={e => setBForm({...bForm, qty:e.target.value})} style={inputStyle} />
+            <input placeholder={bForm.direction==="in" ? "Supplier" : "Dispatch / Order ref"} value={bForm.party} onChange={e => setBForm({...bForm, party:e.target.value})} style={inputStyle} />
+            <button onClick={addBox} style={btnPrimary}>+</button>
+          </div>
+        </div>
+        <TableBlock headers={["Date","Direction","Box Type","Size","Qty","Party / Ref",""]} emptyText="No box movement recorded."
+          rows={boxLog.map(b => [
+            fmtDate(b.date),
+            <span style={{color: b.direction==="in"?"var(--green)":"var(--yellow)"}}>{b.direction==="in" ? "↓ Inward" : "↑ Outward"}</span>,
+            b.type, b.size,
+            <span className="mono">{b.qty}</span>,
+            b.party || "—",
+            <button className="row-btn" onClick={() => delBox(b.id)} style={iconBtn}>✕</button>,
+          ])} />
+      </div>}
+    </div>
+  </div>;
+}
+
+try {
+  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+} catch (e) {
+  document.getElementById("root").innerHTML =
+    '<div style="padding:24px;color:#eae6dd;font-family:monospace;white-space:pre-wrap;">Dashboard failed to load.\n\nError: ' +
+    (e && e.message ? e.message : e) +
+    '\n\nOpen browser DevTools (F12) > Console tab for full details.</div>';
+  console.error(e);
+}
+</script>
+</body>
+</html>
