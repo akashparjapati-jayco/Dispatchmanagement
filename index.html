@@ -1,72 +1,54 @@
-<!-- ============================================================
-     NEW CARD TO ADD TO jayco-portals/index.html
-     Paste this as a 5th card, alongside your existing 4 cards
-     (Production Management, PO Management, Customer Portal, Vendor Payments)
-     Update the href below to wherever you host dispatch-board.html
-     ============================================================ -->
+/**
+ * JAYCO Dispatch Board — Google Sheets backend (standalone script version)
+ * --------------------------------------------------------------------
+ * This script saves/loads the dashboard's data as one JSON blob into a
+ * specific Google Sheet, identified by its Sheet ID below.
+ *
+ * SETUP (do this in order):
+ * 1. Create a blank Google Sheet at sheets.google.com, name it
+ *    "JAYCO Dispatch Data".
+ * 2. Look at its URL: https://docs.google.com/spreadsheets/d/SHEET_ID_HERE/edit
+ *    Copy the long ID string between /d/ and /edit.
+ * 3. Paste that ID into the SHEET_ID constant below, replacing
+ *    "1ffHXSuzhsEx_Vn-MY3GYjePvTEeC5KulogUlDkp11Zc".
+ * 4. Save this script (Ctrl+S).
+ * 5. Click Deploy > New deployment > Web app.
+ *    Execute as: Me
+ *    Who has access: Anyone
+ * 6. Deploy, authorize permissions when asked.
+ * 7. Copy the Web App URL it gives you and send it back so the
+ *    dashboard can be connected to it.
+ */
 
-<div class="portal-card portal-card-dark">
-  <div class="portal-icon">📦</div>
-  <h3>Dispatch Board</h3>
-  <p>Daily paint &amp; repair entries, finish stock, multi-seal packing slips, and box inward/outward tracking.</p>
-  <div class="portal-card-footer">
-    <span class="badge-internal">INTERNAL</span>
-    <a href="dispatch-board.html" class="btn-open-portal">Open Portal →</a>
-  </div>
-</div>
+const SHEET_ID = "1ffHXSuzhsEx_Vn-MY3GYjePvTEeC5KulogUlDkp11Zc";
+const SHEET_TAB_NAME = "DispatchData";
 
-<!-- ============================================================
-     If your existing cards use different class names, use this
-     inline-styled version instead — no CSS classes required,
-     matches the same look (dark card variant shown; swap the
-     background gradient for the red variant if you want this
-     card in the red style instead).
-     ============================================================ -->
+function getSheet_() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  let sheet = ss.getSheetByName(SHEET_TAB_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_TAB_NAME);
+    sheet.getRange("A1").setValue("Dashboard JSON (do not edit manually)");
+    sheet.getRange("B1").setValue("Last Updated");
+  }
+  return sheet;
+}
 
-<div style="
-  background: linear-gradient(160deg, #1a1a1a 0%, #000000 100%);
-  border-radius: 16px;
-  padding: 28px;
-  color: #fff;
-  font-family: -apple-system, 'Segoe UI', Arial, sans-serif;
-  max-width: 420px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.25);
-">
-  <div style="
-    width: 48px; height: 48px;
-    background: rgba(255,255,255,0.08);
-    border-radius: 12px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 22px;
-    margin-bottom: 20px;
-  ">📦</div>
+function doGet(e) {
+  const sheet = getSheet_();
+  const json = sheet.getRange("A2").getValue();
+  const output = json && json.toString().length > 0 ? json.toString() : "";
+  return ContentService
+    .createTextOutput(output)
+    .setMimeType(ContentService.MimeType.JSON);
+}
 
-  <h3 style="margin: 0 0 10px; font-size: 20px; font-weight: 700;">Dispatch Board</h3>
-
-  <p style="margin: 0 0 28px; font-size: 14px; line-height: 1.5; color: #cfcfcf;">
-    Daily paint &amp; repair entries, finish stock, multi-seal packing slips, and box inward/outward tracking.
-  </p>
-
-  <div style="display: flex; justify-content: space-between; align-items: center;">
-    <span style="
-      background: rgba(255,255,255,0.1);
-      color: #d1d5db;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      padding: 6px 12px;
-      border-radius: 6px;
-    ">INTERNAL</span>
-
-    <a href="dispatch-board.html" style="
-      background: #fff;
-      color: #000;
-      font-size: 13px;
-      font-weight: 700;
-      text-decoration: underline;
-      padding: 10px 20px;
-      border-radius: 24px;
-      display: inline-block;
-    ">Open Portal →</a>
-  </div>
-</div>
+function doPost(e) {
+  const sheet = getSheet_();
+  const body = e.postData.contents;
+  sheet.getRange("A2").setValue(body);
+  sheet.getRange("B2").setValue(new Date());
+  return ContentService
+    .createTextOutput(JSON.stringify({ status: "ok" }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
